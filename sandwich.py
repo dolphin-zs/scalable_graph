@@ -15,8 +15,7 @@ class GCNBlock(nn.Module):
                    'gated': GatedGCNNet, 'egnn': EGNNNet}.get(gcn_type)
         self.gcn = GCNUnit(in_channels=in_channels,
                            out_channels=spatial_channels,
-                           normalize=normalize
-                           )
+                           normalize=normalize)
 
     def forward(self, X, g):
         """
@@ -69,8 +68,7 @@ class Sandwich(nn.Module):
                             spatial_channels=hidden_size,
                             num_nodes=num_nodes,
                             gcn_type=gcn_type,
-                            normalize=normalize
-                            )
+                            normalize=normalize)
 
         self.gru = KRNN(num_nodes, hidden_size, num_timesteps_input,
                         num_timesteps_output, hidden_size)
@@ -81,15 +79,22 @@ class Sandwich(nn.Module):
         num_features=in_channels).
         :param A_hat: Normalized adjacency matrix.
         """
-        encoder_out, decoder_residual = self.gru1(X, g['graph_n_id'])
+        if g['type'] == 'dataflow':
+            encoder_out, decoder_residual = self.gru1(X, g['graph_n_id'])
+        elif g['type'] == 'subgraph':
+            encoder_out, decoder_residual = self.gru1(X, g['cent_n_id'])
+        else:
+            raise Exception('Unsupported graph type: {}'.format(g['type']))
+
         gcn_out = self.gcn(encoder_out, g)
 
         _, decoder_out = self.gru(gcn_out, g['cent_n_id'])
         decoder_out = decoder_out.squeeze(dim=-1)
 
         if decoder_residual is not None:
-            for res_n_id in g['res_n_id']:
-                decoder_residual = decoder_residual[:, res_n_id]
+            if g['type'] == 'dataflow':
+                for res_n_id in g['res_n_id']:
+                    decoder_residual = decoder_residual[:, res_n_id]
             decoder_out = decoder_out + decoder_residual
 
         return decoder_out
