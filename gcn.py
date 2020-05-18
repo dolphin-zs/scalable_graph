@@ -175,7 +175,9 @@ class MyGATConv(PyG.MessagePassing):
         return x_j * gate
 
     def update(self, aggr_out, x):
-        x = x[1]
+        if (isinstance(x, tuple) or isinstance(x, list)):
+            x = x[1]
+
         aggr_out = torch.matmul(x, self.u) + aggr_out
 
         if self.normalize == 'bn':
