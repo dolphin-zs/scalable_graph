@@ -122,7 +122,9 @@ class GatedGCNNet(BaseGNNNet):
 
 class MyGATConv(PyG.MessagePassing):
     def __init__(self, in_channels, out_channels, edge_channels=1, normalize='none', **kwargs):
-        super(MyGATConv, self).__init__(aggr='mean', **kwargs)
+        # super(MyGATConv, self).__init__(aggr='mean', **kwargs)
+        # TODO: SAINT may need aggr='add', how about 'mean'
+        super(MyGATConv, self).__init__(aggr='add', **kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -149,7 +151,7 @@ class MyGATConv(PyG.MessagePassing):
         nn.init.xavier_uniform_(self.u)
         nn.init.xavier_uniform_(self.v)
 
-    def forward(self, x, edge_index, edge_weight=None, size=None):
+    def forward(self, x, edge_index, edge_weight=None, edge_norm=None, size=None):
         """"""
         if isinstance(x, torch.Tensor):
             x = torch.matmul(x, self.weight_n)
@@ -164,15 +166,19 @@ class MyGATConv(PyG.MessagePassing):
 
         edge_weight = torch.matmul(edge_weight, self.weight_e)
 
-        return self.propagate(edge_index, size=size, x=x, edge_weight=edge_weight)
+        return self.propagate(edge_index, size=size, x=x, edge_weight=edge_weight, edge_norm=edge_norm)
 
-    def message(self, edge_index_i, x_i, x_j, edge_weight):
+    def message(self, edge_index_i, x_i, x_j, edge_weight, edge_norm):
         x_i = torch.matmul(x_i, self.u)
         x_j = torch.matmul(x_j, self.v)
 
         gate = F.sigmoid(x_i * x_j * edge_weight.unsqueeze(dim=1))
+        msg = x_j * gate
 
-        return x_j * gate
+        if edge_norm is None:
+            return msg
+        else:
+            return msg * edge_norm.reshape(edge_norm.size(0), 1, 1)
 
     def update(self, aggr_out, x):
         if (isinstance(x, tuple) or isinstance(x, list)):
@@ -230,15 +236,19 @@ class GATNet(BaseGNNNet):
     def subgraph_forward(self, X, g):
         edge_index = g['edge_index']
         edge_weight = g['edge_weight']
+        if 'edge_norm' in g:
+            edge_norm = g['edge_norm']
+        else:
+            edge_norm = None
 
         # swap node to dim 0
         X = X.permute(1, 0, 2)
 
-        conv1 = self.conv1(X, edge_index, edge_weight=edge_weight)
+        conv1 = self.conv1(X, edge_index, edge_weight=edge_weight, edge_norm=edge_norm)
 
         X = F.leaky_relu(conv1)
 
-        conv2 = self.conv2(X, edge_index, edge_weight=edge_weight)
+        conv2 = self.conv2(X, edge_index, edge_weight=edge_weight, edge_norm=edge_norm)
 
         X = F.leaky_relu(conv2)
 

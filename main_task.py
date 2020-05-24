@@ -20,7 +20,7 @@ from tgcn import TGCN
 from sandwich import Sandwich
 
 from preprocess import generate_dataset, load_nyc_sharing_bike_data, load_metr_la_data, load_pems_d7_data, get_normalized_adj
-from dataset import NeighborSampleDataset, ClusterDataset
+from dataset import NeighborSampleDataset, ClusterDataset, SAINTDataset
 from base_task import add_config_to_argparse, BaseConfig, BasePytorchTask, \
     LOSS_KEY, BAR_KEY, SCALAR_LOG_KEY, VAL_SCORE_KEY
 
@@ -61,6 +61,10 @@ class STConfig(BaseConfig):
         # for cluster gcn
         self.cluster_part_num = 100  # the number of partitions to divide the graph
         self.cluster_batch_size = 10  # the number of partitions to load at each batch
+        # for graph saint
+        self.saint_batch_size = 50  # the number of nodes to start random walk at each batch
+        self.saint_walk_length = 2  # the length of the random walk
+        self.saint_sample_coverage = 50  # the number of counts per node to computation norm statistics
 
 
 class WrapperNet(nn.Module):
@@ -84,7 +88,7 @@ class SpatialTemporalTask(BasePytorchTask):
         self.log('Intialize {}'.format(self.__class__))
 
         self.init_data()
-        self.loss_func = nn.MSELoss()
+        self.loss_func = nn.MSELoss(reduction='none')
 
         self.log('Config:\n{}'.format(
             json.dumps(self.config.to_dict(), ensure_ascii=False, indent=4)
@@ -110,14 +114,14 @@ class SpatialTemporalTask(BasePytorchTask):
         test_original_data = X[:, :, split_line2:]
 
         self.training_input, self.training_target = generate_dataset(train_original_data,
-                                                                     num_timesteps_input=self.config.num_timesteps_input, num_timesteps_output=self.config.num_timesteps_output
-                                                                     )
+                                                                     num_timesteps_input=self.config.num_timesteps_input,
+                                                                     num_timesteps_output=self.config.num_timesteps_output)
         self.val_input, self.val_target = generate_dataset(val_original_data,
-                                                           num_timesteps_input=self.config.num_timesteps_input, num_timesteps_output=self.config.num_timesteps_output
-                                                           )
+                                                           num_timesteps_input=self.config.num_timesteps_input,
+                                                           num_timesteps_output=self.config.num_timesteps_output)
         self.test_input, self.test_target = generate_dataset(test_original_data,
-                                                             num_timesteps_input=self.config.num_timesteps_input, num_timesteps_output=self.config.num_timesteps_output
-                                                             )
+                                                             num_timesteps_input=self.config.num_timesteps_input,
+                                                             num_timesteps_output=self.config.num_timesteps_output)
 
         self.A = torch.from_numpy(A)
         self.sparse_A = self.A.to_sparse()
@@ -158,6 +162,13 @@ class SpatialTemporalTask(BasePytorchTask):
                 shuffle=shuffle, use_dist_sampler=use_dist_sampler, rep_eval=rep_eval,
                 cluster_part_num=self.config.cluster_part_num,
                 cluster_batch_size=self.config.cluster_batch_size)
+        elif self.config.graph_sampling == 'saint':
+            dataset = SAINTDataset(
+                X, y, self.edge_index, self.edge_weight, self.config.num_nodes, batch_size,
+                shuffle=shuffle, use_dist_sampler=use_dist_sampler, rep_eval=rep_eval,
+                saint_batch_size=self.config.saint_batch_size,
+                saint_walk_length=self.config.saint_walk_length,
+                saint_sample_coverage=self.config.saint_sample_coverage)
         else:
             raise Exception('Unsupported graph sampling type: {}'.format(self.config.graph_sampling))
 
@@ -204,11 +215,17 @@ class SpatialTemporalTask(BasePytorchTask):
 
         y_hat = self.model(X, g)
         assert(y.size() == y_hat.size())
-        loss = self.loss_func(y_hat, y)
+
         if self.config.use_statics:
             y_hat = y_hat * self.std + self.mean
             y = y * self.std + self.mean
-        loss_i = self.loss_func(y_hat, y).item()  # scalar loss
+
+        loss = self.loss_func(y_hat, y)
+        if 'node_norm' in g:
+            node_norm = g['node_norm']
+            loss *= node_norm.reshape(1, node_norm.size(0), 1)  # [batch_size, num_nodes_in_g, num_outputs]
+        loss = loss.mean()
+        loss_i = loss.item()  # scalar loss
 
         return {
             LOSS_KEY: loss,
@@ -227,24 +244,34 @@ class SpatialTemporalTask(BasePytorchTask):
         y_hat = self.model(X, g)
         assert(y.size() == y_hat.size())
 
-        out_dim = y.size(-1)
+        if g['type'] == 'subgraph' and 'node_norm' in g:  # if using SAINT sampler
+            cent_n_id = g['cent_n_id']
+            res_n_id = g['res_n_id']
 
+            # Note: we only evaluation those starting nodes per random walk
+            y = y[:, res_n_id, :]
+            y_hat = y_hat[:, res_n_id, :]
+            cent_n_id = cent_n_id[res_n_id]
+        else:
+            cent_n_id = g['cent_n_id']
+
+        out_dim = y.size(-1)
         index_ptr = torch.cartesian_prod(
             torch.arange(rows.size(0)),
-            torch.arange(g['cent_n_id'].size(0)),
+            torch.arange(cent_n_id.size(0)),
             torch.arange(out_dim)
         )
 
         label = pd.DataFrame({
             'row_idx': rows[index_ptr[:, 0]].data.cpu().numpy(),
-            'node_idx': g['cent_n_id'][index_ptr[:, 1]].data.cpu().numpy(),
+            'node_idx': cent_n_id[index_ptr[:, 1]].data.cpu().numpy(),
             'feat_idx': index_ptr[:, 2].data.cpu().numpy(),
             'val': y[index_ptr.t().chunk(3)].squeeze(dim=0).data.cpu().numpy()
         })
 
         pred = pd.DataFrame({
             'row_idx': rows[index_ptr[:, 0]].data.cpu().numpy(),
-            'node_idx': g['cent_n_id'][index_ptr[:, 1]].data.cpu().numpy(),
+            'node_idx': cent_n_id[index_ptr[:, 1]].data.cpu().numpy(),
             'feat_idx': index_ptr[:, 2].data.cpu().numpy(),
             'val': y_hat[index_ptr.t().chunk(3)].squeeze(dim=0).data.cpu().numpy()
         })
