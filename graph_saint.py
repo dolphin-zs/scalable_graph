@@ -274,7 +274,7 @@ class GraphSAINTRandomWalkSampler(GraphSAINTSampler):
         return node_sample.unbind(dim=0)
 
 
-class MySAINTRandomWalkSampler(object):
+class MySAINTSampler(object):
     r"""A new random-walk sampler for GraphSAINT that samples initial nodes
     by iterating over node permutations. The benefit is that we can leverage
     this sampler for subgraph-based inference.
@@ -292,11 +292,12 @@ class MySAINTRandomWalkSampler(object):
             progress. (default: :obj:`True`)
     """
 
-    def __init__(self, data, batch_size, walk_length, sample_coverage=50,
+    def __init__(self, data, batch_size, sample_type='random_walk', walk_length=2, sample_coverage=50,
                  save_dir=None, log=True):
         assert data.edge_index is not None
         assert 'node_norm' not in data
         assert 'edge_norm' not in data
+        assert sample_type in ('node', 'random_walk')
 
         self.N = N = data.num_nodes
         self.E = data.num_edges
@@ -308,6 +309,7 @@ class MySAINTRandomWalkSampler(object):
         self.data.edge_index = None
         self.data.edge_attr = None
 
+        self.sample_type = sample_type
         self.batch_size = batch_size
         # self.num_steps = num_steps
         self.walk_length = walk_length
@@ -333,11 +335,19 @@ class MySAINTRandomWalkSampler(object):
         node_samples = []
         for s_id in range(0, self.N, self.batch_size):
             init_n_id = all_n_id[s_id:s_id+self.batch_size]  # [batch_size]
-            rw_n_id = self.adj.random_walk(init_n_id, self.walk_length)  # [batch_size, walk_length+1]
-            rw_n_id = rw_n_id.flatten().unique()  # [num_nodes_in_subgraph]
-            tmp_map[rw_n_id] = torch.arange(rw_n_id.size(0), dtype=torch.long)
-            res_n_id = tmp_map[init_n_id]
-            node_samples.append((rw_n_id, res_n_id))
+
+            if self.sample_type == 'random_walk':
+                n_id = self.adj.random_walk(init_n_id, self.walk_length)  # [batch_size, walk_length+1]
+                n_id = n_id.flatten().unique()  # [num_nodes_in_subgraph]
+                tmp_map[n_id] = torch.arange(n_id.size(0), dtype=torch.long)
+                res_n_id = tmp_map[init_n_id]
+            elif self.sample_type == 'node':
+                n_id = init_n_id
+                res_n_id = torch.arange(n_id.size(0), dtype=torch.long)
+            else:
+                raise ValueError('Unsupported value type {}'.format(self.sample_type))
+
+            node_samples.append((n_id, res_n_id))
 
         return node_samples
 

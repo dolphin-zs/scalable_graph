@@ -5,7 +5,7 @@ import torch.distributed as dist
 
 from torch_geometric.data import Data, ClusterData, ClusterLoader, NeighborSampler
 from torch.utils.data import DataLoader, TensorDataset, IterableDataset
-from graph_saint import MySAINTRandomWalkSampler
+from graph_saint import MySAINTSampler
 
 
 class NeighborSampleDataset(IterableDataset):
@@ -272,7 +272,8 @@ class ClusterDataset(IterableDataset):
 class SAINTDataset(IterableDataset):
     def __init__(self, X, y, edge_index, edge_weight, num_nodes, batch_size,
                  shuffle=False, use_dist_sampler=False, rep_eval=None,
-                 saint_batch_size=50, saint_walk_length=2, saint_sample_coverage=50):
+                 saint_sample_type='random_walk', saint_batch_size=100,
+                 saint_walk_length=2, saint_sample_coverage=50, use_saint_norm=True):
         self.X = X
         self.y = y
 
@@ -285,12 +286,16 @@ class SAINTDataset(IterableDataset):
         self.use_dist_sampler = use_dist_sampler
         # number of repeats to run evaluation, set to None for training
         self.rep_eval = rep_eval
+        # the type of the sampling method used in GraphSAINT
+        self.saint_sample_type = 'random_walk'
         # the number of initial nodes for random walk at each batch
         self.saint_batch_size = saint_batch_size
         # the length of each random walk
         self.saint_walk_length = saint_walk_length
         # the number of samples per node used to compute normalization statistics
         self.saint_sample_coverage = saint_sample_coverage
+        # whether to use SAINT-based node/edge normalization tricks
+        self.use_saint_norm = use_saint_norm
 
         # use 'epoch' as the random seed to shuffle data for distributed training
         self._epoch = None
@@ -303,8 +308,9 @@ class SAINTDataset(IterableDataset):
                      edge_attr=self.edge_weight,
                      num_nodes=self.num_nodes)
 
-        saint_sampler = MySAINTRandomWalkSampler(
-            graph, self.saint_batch_size, self.saint_walk_length,
+        saint_sampler = MySAINTSampler(
+            graph, self.saint_batch_size,
+            sample_type=self.saint_sample_type, walk_length=self.saint_walk_length,
             sample_coverage=self.saint_sample_coverage, save_dir=None, log=False)
 
         return saint_sampler
@@ -316,9 +322,13 @@ class SAINTDataset(IterableDataset):
             'edge_weight': saint_data.edge_attr,
             'cent_n_id': saint_data.n_id,
             'res_n_id': saint_data.res_n_id,
-            'node_norm': saint_data.node_norm,
-            'edge_norm': saint_data.edge_norm,
+            # 'node_norm': saint_data.node_norm,
+            # 'edge_norm': saint_data.edge_norm,
         }
+
+        if self.use_saint_norm:
+            graph['node_norm'] = saint_data.node_norm
+            graph['edge_norm'] = saint_data.edge_norm
 
         return graph
 

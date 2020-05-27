@@ -28,6 +28,80 @@ class BaseGNNNet(nn.Module):
             raise Exception('Unsupported graph type {}'.format(g['type']))
 
 
+class MySAGEConv(PyG.SAGEConv):
+    def __init__(self, in_channels, out_channels, normalize=False, concat=False, bias=True, **kwargs):
+        super(MySAGEConv, self).__init__(in_channels, out_channels,
+                                         normalize=normalize, concat=concat, bias=bias, **kwargs)
+
+    def message(self, x_j, edge_weight):
+        return x_j if edge_weight is None else edge_weight.view(-1, 1, 1) * x_j
+
+    def update(self, aggr_out, x, res_n_id):
+        if self.concat and torch.is_tensor(x):
+            aggr_out = torch.cat([x, aggr_out], dim=-1)
+        elif self.concat and (isinstance(x, tuple) or isinstance(x, list)):
+            assert res_n_id is not None
+            aggr_out = torch.cat([x[0][res_n_id], aggr_out], dim=-1)
+
+        aggr_out = torch.matmul(aggr_out, self.weight)
+
+        if self.bias is not None:
+            aggr_out = aggr_out + self.bias
+
+        if self.normalize:
+            aggr_out = F.normalize(aggr_out, p=2, dim=-1)
+
+        return aggr_out
+
+
+class SAGENet(BaseGNNNet):
+    def __init__(self, in_channels, out_channels, **kwargs):
+        super(SAGENet, self).__init__()
+        self.conv1 = MySAGEConv(
+            in_channels, 16, normalize=False, concat=True)
+        self.conv2 = MySAGEConv(
+            16, out_channels, normalize=False, concat=True)
+
+    def dataflow_forward(self, X, g):
+        edge_index = g['edge_index']
+        edge_weight = g['edge_weight']
+
+        size = g['size']
+        res_n_id = g['res_n_id']
+
+        # swap node to dim 0
+        X = X.permute(1, 0, 2)
+
+        conv1 = self.conv1(
+            (X, None), edge_index[0], edge_weight=edge_weight[0], size=size[0], res_n_id=res_n_id[0])
+
+        X = F.leaky_relu(conv1)
+
+        conv2 = self.conv2(
+            (X, None), edge_index[1], edge_weight=edge_weight[1], size=size[1], res_n_id=res_n_id[1])
+
+        X = F.leaky_relu(conv2)
+        X = X.permute(1, 0, 2)
+        return X
+
+    def subgraph_forward(self, X, g):
+        edge_index = g['edge_index']
+        edge_weight = g['edge_weight']
+
+        # swap node to dim 0
+        X = X.permute(1, 0, 2)
+
+        conv1 = self.conv1(X, edge_index, edge_weight=edge_weight)
+
+        X = F.leaky_relu(conv1)
+
+        conv2 = self.conv2(X, edge_index, edge_weight=edge_weight)
+
+        X = F.leaky_relu(conv2)
+        X = X.permute(1, 0, 2)
+        return X
+
+
 class GatedGCN(PyG.MessagePassing):
     """
     The GatedGCN operator from the `"Residual Gated Graph ConvNets"
@@ -170,7 +244,7 @@ class MyGATConv(PyG.MessagePassing):
         x_i = torch.matmul(x_i, self.u)
         x_j = torch.matmul(x_j, self.v)
 
-        gate = F.sigmoid(x_i * x_j * edge_weight.unsqueeze(dim=1))
+        gate = torch.sigmoid(x_i * x_j * edge_weight.unsqueeze(dim=1))
         msg = x_j * gate
 
         if edge_norm is None:
@@ -202,9 +276,11 @@ class GATNet(BaseGNNNet):
     def __init__(self, in_channels, out_channels, normalize):
         super(GATNet, self).__init__()
         self.conv1 = MyGATConv(in_channels=in_channels,
-                               out_channels=16, normalize=normalize)
-        self.conv2 = MyGATConv(
-            in_channels=16, out_channels=out_channels, normalize=normalize)
+                               out_channels=16,
+                               normalize=normalize)
+        self.conv2 = MyGATConv(in_channels=16,
+                               out_channels=out_channels,
+                               normalize=normalize)
 
     def dataflow_forward(self, X, g):
         edge_index = g['edge_index']
@@ -254,80 +330,6 @@ class GATNet(BaseGNNNet):
         return X
 
 
-class MySAGEConv(PyG.SAGEConv):
-    def __init__(self, in_channels, out_channels, normalize=False, concat=False, bias=True, **kwargs):
-        super(MySAGEConv, self).__init__(in_channels, out_channels,
-                                         normalize=normalize, concat=concat, bias=bias, **kwargs)
-
-    def message(self, x_j, edge_weight):
-        return x_j if edge_weight is None else edge_weight.view(-1, 1, 1) * x_j
-
-    def update(self, aggr_out, x, res_n_id):
-        if self.concat and torch.is_tensor(x):
-            aggr_out = torch.cat([x, aggr_out], dim=-1)
-        elif self.concat and (isinstance(x, tuple) or isinstance(x, list)):
-            assert res_n_id is not None
-            aggr_out = torch.cat([x[0][res_n_id], aggr_out], dim=-1)
-
-        aggr_out = torch.matmul(aggr_out, self.weight)
-
-        if self.bias is not None:
-            aggr_out = aggr_out + self.bias
-
-        if self.normalize:
-            aggr_out = F.normalize(aggr_out, p=2, dim=-1)
-
-        return aggr_out
-
-
-class SAGENet(BaseGNNNet):
-    def __init__(self, in_channels, out_channels, **kwargs):
-        super(SAGENet, self).__init__()
-        self.conv1 = MySAGEConv(
-            in_channels, 16, normalize=False, concat=True)
-        self.conv2 = MySAGEConv(
-            16, out_channels, normalize=False, concat=True)
-
-    def dataflow_forward(self, X, g):
-        edge_index = g['edge_index']
-        edge_weight = g['edge_weight']
-
-        size = g['size']
-        res_n_id = g['res_n_id']
-
-        # swap node to dim 0
-        X = X.permute(1, 0, 2)
-
-        conv1 = self.conv1(
-            (X, None), edge_index[0], edge_weight=edge_weight[0], size=size[0], res_n_id=res_n_id[0])
-
-        X = F.leaky_relu(conv1)
-
-        conv2 = self.conv2(
-            (X, None), edge_index[1], edge_weight=edge_weight[1], size=size[1], res_n_id=res_n_id[1])
-
-        X = F.leaky_relu(conv2)
-        X = X.permute(1, 0, 2)
-        return X
-
-    def subgraph_forward(self, X, g):
-        edge_index = g['edge_index']
-        edge_weight = g['edge_weight']
-
-        # swap node to dim 0
-        X = X.permute(1, 0, 2)
-
-        conv1 = self.conv1(X, edge_index, edge_weight=edge_weight)
-
-        X = F.leaky_relu(conv1)
-
-        conv2 = self.conv2(X, edge_index, edge_weight=edge_weight)
-
-        X = F.leaky_relu(conv2)
-        X = X.permute(1, 0, 2)
-        return X
-
-
 class MyEGNNConv(PyG.MessagePassing):
     def __init__(self, in_channels, out_channels, edge_channels=1, normalize='none', **kwargs):
         super(MyEGNNConv, self).__init__(aggr='add', **kwargs)
@@ -363,7 +365,7 @@ class MyEGNNConv(PyG.MessagePassing):
         nn.init.xavier_uniform_(self.query)
         nn.init.xavier_uniform_(self.key)
 
-    def forward(self, x, edge_index, edge_feature, size=None, indices=None):
+    def forward(self, x, edge_index, edge_feature, size=None, indices=None, edge_norm=None):
         if torch.is_tensor(x):
             x = torch.matmul(x, self.weight_n)
         else:
@@ -372,9 +374,9 @@ class MyEGNNConv(PyG.MessagePassing):
 
         edge_emb = torch.matmul(edge_feature, self.weight_e)
 
-        return self.propagate(edge_index, size=size, x=x, edge_emb=edge_emb, indices=indices)
+        return self.propagate(edge_index, size=size, x=x, edge_emb=edge_emb, indices=indices, edge_norm=edge_norm)
 
-    def message(self, x_j, x_i, edge_emb):
+    def message(self, x_j, x_i, edge_emb, edge_norm):
         # cal att of shape [B, E, 1]
         query = torch.matmul(x_j, self.query)
         key = torch.matmul(x_i, self.key)
@@ -382,12 +384,17 @@ class MyEGNNConv(PyG.MessagePassing):
         edge_emb = edge_emb.unsqueeze(dim=1).expand_as(query)
 
         att_feature = torch.cat([query, key, edge_emb], dim=-1)
-        att = F.sigmoid(self.linear_att(att_feature))
+        att = torch.sigmoid(self.linear_att(att_feature))
 
         # gate of shape [1, E, C]
-        gate = F.sigmoid(edge_emb)
+        gate = torch.sigmoid(edge_emb)
 
-        return att * x_j * gate
+        msg = att * x_j * gate
+
+        if edge_norm is None:
+            return msg
+        else:
+            return msg * edge_norm.reshape(edge_norm.size(0), 1, 1)
 
     def update(self, aggr_out, x, indices):
         if (isinstance(x, tuple) or isinstance(x, list)):
@@ -426,13 +433,17 @@ class EGNNNet(BaseGNNNet):
         # swap node to dim 0
         X = X.permute(1, 0, 2)
 
-        X = self.conv1(
-            (X, X[res_n_id[0]]), edge_index[0], edge_feature=edge_weight[0].unsqueeze(-1), size=size[0], indices=n_id[0][res_n_id[0]])
+        X = self.conv1((X, X[res_n_id[0]]), edge_index[0],
+                       edge_feature=edge_weight[0].unsqueeze(-1),
+                       size=size[0],
+                       indices=n_id[0][res_n_id[0]])
 
         X = F.leaky_relu(X)
 
-        X = self.conv2(
-            (X, X[res_n_id[1]]), edge_index[1], edge_feature=edge_weight[1].unsqueeze(-1), size=size[1], indices=n_id[1][res_n_id[1]])
+        X = self.conv2((X, X[res_n_id[1]]), edge_index[1],
+                       edge_feature=edge_weight[1].unsqueeze(-1),
+                       size=size[1],
+                       indices=n_id[1][res_n_id[1]])
 
         X = F.leaky_relu(X)
         X = X.permute(1, 0, 2)
@@ -443,18 +454,27 @@ class EGNNNet(BaseGNNNet):
         edge_index = g['edge_index']
         edge_weight = g['edge_weight']
         n_id = g['cent_n_id']
+        if 'edge_norm' in g:
+            edge_norm = g['edge_norm']
+        else:
+            edge_norm = None
 
         # swap node to dim 0
         X = X.permute(1, 0, 2)
 
-        X = self.conv1(X, edge_index, edge_feature=edge_weight.unsqueeze(-1), indices=n_id)
+        X = self.conv1(X, edge_index,
+                       edge_feature=edge_weight.unsqueeze(-1),
+                       indices=n_id,
+                       edge_norm=edge_norm)
 
         X = F.leaky_relu(X)
 
-        X = self.conv2(X, edge_index, edge_feature=edge_weight.unsqueeze(-1), indices=n_id)
+        X = self.conv2(X, edge_index,
+                       edge_feature=edge_weight.unsqueeze(-1),
+                       indices=n_id,
+                       edge_norm=edge_norm)
 
         X = F.leaky_relu(X)
         X = X.permute(1, 0, 2)
 
         return X
-

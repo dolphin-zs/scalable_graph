@@ -62,9 +62,11 @@ class STConfig(BaseConfig):
         self.cluster_part_num = 100  # the number of partitions to divide the graph
         self.cluster_batch_size = 10  # the number of partitions to load at each batch
         # for graph saint
-        self.saint_batch_size = 50  # the number of nodes to start random walk at each batch
-        self.saint_walk_length = 2  # the length of the random walk
+        self.saint_sample_type = 'random_walk'  # choices: random_walk, node
+        self.saint_batch_size = 100  # the number of initial nodes for random walk at each batch
+        self.saint_walk_length = 2  # the length of each random walk
         self.saint_sample_coverage = 50  # the number of counts per node to computation norm statistics
+        self.use_saint_norm = True  # whether to use SAINT normalization tricks
 
 
 class WrapperNet(nn.Module):
@@ -166,9 +168,11 @@ class SpatialTemporalTask(BasePytorchTask):
             dataset = SAINTDataset(
                 X, y, self.edge_index, self.edge_weight, self.config.num_nodes, batch_size,
                 shuffle=shuffle, use_dist_sampler=use_dist_sampler, rep_eval=rep_eval,
+                saint_sample_type=self.config.saint_sample_type,
                 saint_batch_size=self.config.saint_batch_size,
                 saint_walk_length=self.config.saint_walk_length,
-                saint_sample_coverage=self.config.saint_sample_coverage)
+                saint_sample_coverage=self.config.saint_sample_coverage,
+                use_saint_norm=self.config.use_saint_norm)
         else:
             raise Exception('Unsupported graph sampling type: {}'.format(self.config.graph_sampling))
 
@@ -221,9 +225,13 @@ class SpatialTemporalTask(BasePytorchTask):
             y = y * self.std + self.mean
 
         loss = self.loss_func(y_hat, y)
+        # if we do not use 'SAINTDataset' or we set 'use_saint_norm' as False,
+        # 'g' will not cover 'node_norm'.
         if 'node_norm' in g:
             node_norm = g['node_norm']
             loss = loss * node_norm.reshape(1, node_norm.size(0), 1)  # [batch_size, num_nodes_in_g, num_outputs]
+            # since we normalize at the node level, according to the equations in the paper,
+            # we should sum those node-level normalized loss values
             loss = loss.sum(dim=1)  # [batch_size, num_outputs]
         loss = loss.mean()
         loss_i = loss.item()  # scalar loss
@@ -245,11 +253,11 @@ class SpatialTemporalTask(BasePytorchTask):
         y_hat = self.model(X, g)
         assert(y.size() == y_hat.size())
 
-        if g['type'] == 'subgraph' and 'node_norm' in g:  # if using SAINT sampler
+        if g['type'] == 'subgraph' and 'res_n_id' in g:  # if using SAINT sampler
             cent_n_id = g['cent_n_id']
             res_n_id = g['res_n_id']
-
-            # Note: we only evaluation those starting nodes per random walk
+            # Note: we only evaluate predictions on those initial nodes (per random walk)
+            # to avoid duplicated computations
             y = y[:, res_n_id, :]
             y_hat = y_hat[:, res_n_id, :]
             cent_n_id = cent_n_id[res_n_id]
@@ -267,14 +275,16 @@ class SpatialTemporalTask(BasePytorchTask):
             'row_idx': rows[index_ptr[:, 0]].data.cpu().numpy(),
             'node_idx': cent_n_id[index_ptr[:, 1]].data.cpu().numpy(),
             'feat_idx': index_ptr[:, 2].data.cpu().numpy(),
-            'val': y[index_ptr.t().chunk(3)].squeeze(dim=0).data.cpu().numpy()
+            'val': y.flatten().data.cpu().numpy()
+            # 'val': y[index_ptr.t().chunk(3)].squeeze(dim=0).data.cpu().numpy()
         })
 
         pred = pd.DataFrame({
             'row_idx': rows[index_ptr[:, 0]].data.cpu().numpy(),
             'node_idx': cent_n_id[index_ptr[:, 1]].data.cpu().numpy(),
             'feat_idx': index_ptr[:, 2].data.cpu().numpy(),
-            'val': y_hat[index_ptr.t().chunk(3)].squeeze(dim=0).data.cpu().numpy()
+            'val': y_hat.flatten().data.cpu().numpy()
+            # 'val': y_hat[index_ptr.t().chunk(3)].squeeze(dim=0).data.cpu().numpy()
         })
 
         pred = pred.groupby(['row_idx', 'node_idx', 'feat_idx']).mean()
