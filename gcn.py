@@ -122,9 +122,7 @@ class GatedGCNNet(BaseGNNNet):
 
 class MyGATConv(PyG.MessagePassing):
     def __init__(self, in_channels, out_channels, edge_channels=1, normalize='none', **kwargs):
-        # super(MyGATConv, self).__init__(aggr='mean', **kwargs)
-        # TODO: SAINT may need aggr='add', how about 'mean'
-        super(MyGATConv, self).__init__(aggr='add', **kwargs)
+        super(MyGATConv, self).__init__(aggr='mean', **kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels

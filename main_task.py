@@ -223,7 +223,8 @@ class SpatialTemporalTask(BasePytorchTask):
         loss = self.loss_func(y_hat, y)
         if 'node_norm' in g:
             node_norm = g['node_norm']
-            loss *= node_norm.reshape(1, node_norm.size(0), 1)  # [batch_size, num_nodes_in_g, num_outputs]
+            loss = loss * node_norm.reshape(1, node_norm.size(0), 1)  # [batch_size, num_nodes_in_g, num_outputs]
+            loss = loss.sum(dim=1)  # [batch_size, num_outputs]
         loss = loss.mean()
         loss_i = loss.item()  # scalar loss
 
