@@ -287,7 +287,7 @@ class SAINTDataset(IterableDataset):
         # number of repeats to run evaluation, set to None for training
         self.rep_eval = rep_eval
         # the type of the sampling method used in GraphSAINT
-        self.saint_sample_type = 'random_walk'
+        self.saint_sample_type = saint_sample_type
         # the number of initial nodes for random walk at each batch
         self.saint_batch_size = saint_batch_size
         # the length of each random walk
