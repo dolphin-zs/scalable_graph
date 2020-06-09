@@ -243,7 +243,7 @@ class BasePytorchTask(ABC):
                 self.log('Create experimental directory {}'.format(self.config.exp_dir))
 
             # build sub-directory structures
-            for dir_name in [CPT_DIR_NAME, OUT_DIR_NAME]:
+            for dir_name in [CPT_DIR_NAME, OUT_DIR_NAME, LOG_DIR_NAME]:
                 dir_path = os.path.join(self.config.exp_dir, dir_name)
                 os.makedirs(dir_path, exist_ok=True)
                 self.log('Creat sub-directory {}'.format(dir_path))
