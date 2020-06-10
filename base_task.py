@@ -423,6 +423,7 @@ class BasePytorchTask(ABC):
                 for fn in os.listdir(runtime_log_dir):
                     raw_fp = os.path.join(runtime_log_dir, fn)
                     shutil.copy(raw_fp, self._log_dir_path)
+                    self.log('Copy tensorboard {} to {}'.format(raw_fp, self._log_dir_path))
 
     def dump(self, val_out=None, test_out=None, epoch_idx=None, is_best=False, dump_option=1):
         # only the master node can dump outputs
